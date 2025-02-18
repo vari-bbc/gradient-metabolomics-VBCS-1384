@@ -1,0 +1,623 @@
+---
+title: "Initial Data Processing"
+author: "Hannah Damico"
+date: '`r Sys.Date()`'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+options(bitmapType = "cairo", scipen = 9999)
+# sourced file below must exist in the same working directly as this file to run exactly as below
+# if different directory, then change path below
+source("libs_opts.R")
+```
+
+```{r}
+metab_data_og <- read.csv("/varidata/research/projects/bbc/research/FONY_richard_widegradient_VBCS-1384/250214_MC00409_profiling_CellsV2/3_tables/MC00409_Merged_PoolSize.csv")
+# filter data to remove QCs and Blanks
+# Mike Vincent from Mass Spec performs Blank + QC filtering before giving us the data
+metab_data_filt1 <- metab_data_og[!grepl(paste(c("QC", "Blank"), collapse = "|"), metab_data_og$Sample), ]
+
+# grab groups and reps (Plates)
+metab_data_filt1 <- metab_data_filt1 %>%  mutate(
+    Group = sapply(strsplit(Sample, "[-_]"), function(x) x[2]),  # Extract "w00"
+    Plate = sapply(strsplit(Sample, "[-_]"), function(x) x[3])
+  ) %>% relocate(Sample, Group, Group)
+
+metab_data_filt1$Plate <- factor(metab_data_filt1$Plate)
+# table(metab_data_og$Sample)
+# table(metab_data_filt1$Group)
+
+```
+
+
+
+## ------
+
+#  {.tabset}
+## QC and data processing {.tabset}
+
+This section pertains entirely to data processing including removal of Metabolites with too much missing data. Data are then normalized and missing measures are imputed.
+
+There were 3 Metabolites removed due to 0 variance.     
+
+ISTD.D5.Glutamate_IP     
+Palmitoylcarnitine_HILICA        
+pipecolate_HILICA 
+
+
+```{r}
+## Checking for 0 variance
+# change all metabolite data to be numeric
+metab_data_filt1[, 4:ncol(metab_data_filt1)] = lapply(metab_data_filt1[, 4:ncol(metab_data_filt1)], as.numeric)
+# save matrix of ONLY metabolites
+xx = data.matrix(metab_data_filt1[,4:ncol(metab_data_filt1)])
+# if missing, mark as 0
+xx[is.na(xx)]  = 0
+# assign newly 0 identified data to dataset
+# important for variance calculation
+# must not include NA values
+# here we consider NA means "too low to detect/measure"
+metab_data_filt1[,4:ncol(metab_data_filt1)] = xx ### convert NA to 0s 
+
+# find variance of all metabolites
+vars = apply(data.matrix(metab_data_filt1[,4:ncol(metab_data_filt1)]), 2, var)
+# list of metabolites with 0 variance
+# if you print 'ix', the number included is the index of that metabolite in the vars vector
+ix = which(vars==0)
+
+# code below removes metabs w 0 variance and keeps those w variance > 0
+if(length(ix)>0){
+metab_data_filt1 = metab_data_filt1[,! colnames(metab_data_filt1) %in% names(ix)]
+}
+
+# to save names of metabolites removed due to having 0 variance, run below
+# first create folder names supplemental_items
+# this saves as an RDS object that can be opened in R
+# saveRDS(names(ix), "supplemental_items/metabs_0variance.rds")
+```
+
+
+### Metabolites identifed per sample {.tabset}
+
+#### Per sample
+
+Plotted here are the number of Metabolites detected per sample. 
+
+```{r 'num_Metabolites_detected_per_sample'}
+
+# create df counting number of non-zero observations per sample
+dats = data.frame( ID=metab_data_filt1$Sample, Group = metab_data_filt1$Group, count = unlist(lapply(1:nrow(metab_data_filt1),function(x) sum(metab_data_filt1[x,4:ncol(metab_data_filt1)]>0,na.rm=T) )))
+# sort in order of gradient group
+dats = dats[order(dats$Group),]
+dats$ID = factor(dats$ID,levels=unique(dats$ID))
+
+g = ggplot(dats,aes(x=ID,y=count,fill=Group)) + geom_bar(stat="identity")+theme_classic()+
+  scale_y_continuous(expand=c(0,0))+scale_fill_manual(values=viridis::viridis(8)[1:8] )+theme(axis.text.x = element_text(angle=45,hjust=1)) + ggtitle("Number of Metabolites Detected Per Sample") 
+
+library(plotly) 
+ggplotly(g) 
+
+# for Richard - 2025/02/18
+# Table of metabolites detected by group
+metabs_detected <- reshape2::melt(metab_data_filt1, c("Sample", "Group")) %>%  filter(value > 0) %>% arrange(Group) %>% distinct(Group, variable)
+
+DT::datatable(metabs_detected)
+
+# saveRDS(metabs_detected, "metabs_detected.rds")
+```
+
+&nbsp;
+&nbsp;
+&nbsp;
+&nbsp;
+
+
+#### Per Group Comparisons
+
+Richard, don't worry about trying to follow the code for this, I wanted to test running a Shiny Application in R Markdown HTML files as the BBC is looking to incorporate more of this into our reports. If you have any questions or are interested in learning more, please let me know, but if Shiny coding is entirely unfamiliar to you, then I wouldn't open this can of worms. 
+ 
+ <iframe src=" https://vai-bbc.shinyapps.io/FONY_richard_widegradient_VBCS-1384/" width="100%" height="600px" frameborder="0"></iframe>
+
+
+### Missingness per sample 
+
+In the heatmaps below, white indicates a missing value, black indicates a value >0 was detected.  
+
+```{r 'miss_HM'}
+# counts the number of times a metabolite is equal to 0
+ind = function(x){
+  sum(as.numeric(I(x==0)))
+}
+
+# save temporary metabolite data
+temp = metab_data_filt1[4:ncol(metab_data_filt1)]
+
+# Label all missing values as 0s
+temp[is.na(temp)] = 0 
+# Label all non-missing values as 1s
+temp[temp > 0] = 1
+# Add group to temp data
+temp$Group = metab_data_filt1$Group
+# Position group at front of dataframe
+temp = temp %>% relocate(Group)
+# Make rownames as Sample IDs
+rownames(temp) <- metab_data_filt1$Sample
+
+# Transpose your data to appease pheatmap's required structure 
+heat.df = t(sapply(temp[, 2:length(temp)], as.numeric))
+# remove rownames
+rownames(heat.df) = NULL
+# name columns as sample IDs now that data is transposed
+colnames(heat.df) = metab_data_filt1$Sample
+# grab 6 colors from the Viridis package
+Var1 <- viridis::viridis(6)
+# assign colors to aresenic dosage groups
+names(Var1) <- unique(factor(temp$Group, levels = unique(temp$Group)))
+anno_colors <- list(Group = Var1)
+
+# NOTE: pheatmap clusters rows + cols by default
+
+# HM UNCLUSTERED
+pheatmap(heat.df,annotation_col=subset(temp,select= c(Group)),color = colorRampPalette(c("white","black"))(2),annotation_colors = anno_colors, cluster_cols = FALSE, cluster_rows = FALSE, main = "No clustering")
+
+# HM clustered by rows only
+pheatmap(heat.df, annotation_col=subset(temp,select= c(Group)), cluster_cols = FALSE, color = colorRampPalette(c("white","black"))(2), annotation_colors = anno_colors, main = "Clustered by Metabs w/ similar missingness")
+
+# HM clustered by cols only
+pheatmap(heat.df, annotation_col=subset(temp,select= c(Group)), cluster_cols = TRUE, cluster_rows = FALSE, color = colorRampPalette(c("white","black"))(2), annotation_colors = anno_colors, main = "Clustered by Metabs w/ similar missingness")
+
+# HM clustered by rows + columns
+pheatmap(heat.df, annotation_col=subset(temp,select= c(Group)), cluster_cols = T, color = colorRampPalette(c("white","black"))(2), annotation_colors = anno_colors, main = "Clustered by Metabs w/ similar missingness")
+
+
+```
+
+
+
+### Remove Metabolites with too much missing data
+
+The plot below has the number of times a given Metabolite is missing by group and how often that amount of missingness occurs.  Metabolites with more than 30% of analytes missing will be removed. A larger proportion of WT treated samples have missing values than any other group. 
+
+
+```{r 'plot_missingness',  fig.width=18, fig.height=12}
+# relabel 0s as NAs
+metab_data_og[metab_data_og == 0]<-NA
+# I used the og dataset here so we could see the missingess in metabs
+# that were removed for 0 variance as well
+# plots metabolites with any missing data
+plot_missing(metab_data_og, missing_only = T) 
+
+```
+
+```{r 'Metabolites_miss'}
+# Count missing values by arsenic dosage group
+
+# relabel 0s as NAs in your metab_data_filt1 
+metab_data_filt1[metab_data_filt1 == 0]<-NA
+
+ind = function(x){
+  sum(as.numeric(I(x==0)))
+}
+
+
+dff=NULL ## renaming this to dff so I don't overwrite the original dataframe
+
+# loop through and count instances of 0s across groups
+for(i in unique(metab_data_filt1$Group)){
+  dff=rbind(dff, apply(metab_data_filt1[metab_data_filt1$Group == i, 4:ncol(metab_data_filt1)], 2, ind))
+}
+
+
+
+dff=as.data.frame(t(dff))
+colnames(dff)  = unique(metab_data_filt1$Group)
+# length(which(is.na(dff))) # 72 total missing values 
+
+## count missing values 
+miss <-  data.frame(Group = unique(metab_data_filt1$Group), Missing = colSums(is.na(dff)), Freq = c(table(dff$`0uM`), table(dff$`0pt25uM`), table(dff$`0pt5uM`), table(dff$`1uM`), table(dff$`2uM`), table(dff$`4uM`)))
+
+### repeat process for Plate
+
+
+dff_Compound=NULL ## renaming this to dff so I don't overwrite the original dataframe
+
+for(i in unique(metab_data_filt1$Plate)){
+  dff_Compound=rbind(dff_Compound, apply(metab_data_filt1[metab_data_filt1$Plate == i, 4:ncol(metab_data_filt1)], 2, ind))
+}
+
+
+
+dff_Compound=as.data.frame(t(dff_Compound))
+colnames(dff_Compound)  = unique(metab_data_filt1$Plate)
+# length(which(is.na(dff))) # 72 total missing values 
+
+## count missing values 
+miss_Compound <-  data.frame(
+  Plate = colnames(dff_Compound),
+  Missing = colSums(is.na(dff_Compound)),
+  Freq = c(
+    table(dff_Compound$`1`),
+    table(dff_Compound$`2`),
+    table(dff_Compound$`3`)
+  )
+)
+
+```
+
+
+
+```{r}
+# generate plot to show missingness by group
+na_plot1 <- ggplot(miss,aes(x=Missing,y=Freq,fill=Group)) + 
+  geom_bar(stat="identity") + 
+  theme_classic() + 
+  ggtitle("Compare Missingness by Group") + 
+  labs(caption = "Number of Times a Metabolite is Missing By Group") + 
+  scale_y_continuous(breaks = seq(0,250, by = 10)) 
+
+ggplotly(na_plot1)
+```
+
+
+```{r}
+# missingness by plate
+na_plot2 <- ggplot(miss_Compound,aes(x=Missing,y=Freq,fill=Plate)) + 
+  geom_bar(stat="identity", position = "dodge") + 
+  theme_classic() + 
+  ggtitle("Compare Missingness by Compound") + 
+  labs(caption = "Number of Times a Metabolite is Missing By Plate") + scale_y_continuous(breaks = seq(0,240, by = 10))
+na_plot2
+```
+
+```{r}
+# Calculate the percentage of missing values in each column
+missing_percentage <- colMeans(is.na(metab_data_filt1[4:ncol(metab_data_filt1)])) * 100
+
+# Identify columns with greater than 30% missingness
+columns_to_remove <- names(metab_data_filt1[4:ncol(metab_data_filt1)])[missing_percentage > 30]
+
+# Remove columns with greater than 30% missingness
+# metab_data_filt1 is written over to remove the cols w/ >30% missingness
+data_filtered <- metab_data_filt1[, !(names(metab_data_filt1) %in% columns_to_remove)]
+# use metab_data_filt2 moving forward
+metab_data_filt2 <- data_filtered
+```
+
+
+```{r}
+# we need to impute because we have Metabolites with <30% missingness
+missing_data_plot <- (data.frame(Metabolite = rownames(as.data.frame(missing_percentage)),missing_percentage)) %>% filter(missing_percentage > 0) %>% ggplot() + geom_bar(aes(Metabolite, missing_percentage), stat = "identity") + coord_flip() + ylab("% Missing Data") + ggtitle("Metabolites with Missing Data")
+ggplotly(missing_data_plot)
+``` 
+
+
+### Metabolites with missingness between 0-30%
+
+```{r 'Metabolites_miss30',  warning = FALSE}
+# similar code process to those before that use the ind() function
+dff=NULL
+for(i in unique(data_filtered$Group)){
+  dff=rbind(dff, apply(data_filtered[data_filtered$Group == i,4:(ncol(data_filtered))], 2, ind))
+}
+
+dff=as.data.frame(t(dff))
+colnames(dff)  = unique(data_filtered$Group)
+
+
+dff2 <- data.frame(Metabolite = rownames(dff), 
+                   g_0um = dff$`0uM`, g_0pt25uM = dff$`0pt25uM`, 
+                   g_0pt5uM = dff$`0pt5uM`, g_1uM = dff$`1uM`,
+                   g_2uM = dff$`2uM`, g_4uM = dff$`4uM`)
+
+dff3 <- dff2 %>% group_by(Metabolite) %>% 
+  summarize(missing_0um = sum(is.na(g_0um)), 
+            missing_0pt25uM = sum(is.na(g_0pt25uM)),
+            missing_0pt5uM = sum(is.na(g_0pt5uM)), 
+            missing_1uM = sum(is.na(g_1uM)),
+            missing_2uM = sum(is.na(g_2uM)),
+            missing_4uM = sum(is.na(g_4uM)))
+
+
+dff3_melted <- reshape2::melt(dff3, id.var = "Metabolite", value.name = "Total Missingness", variable.name = "Group")
+
+
+
+na_plot3 <- (data.frame(Metabolite = rownames(as.data.frame(missing_percentage)),missing_percentage)) %>% filter(missing_percentage < 30 & missing_percentage > 0) %>% ggplot() + geom_bar(aes(Metabolite, missing_percentage), stat = "identity") + coord_flip() + ylab("% Missing Data") + ggtitle("Metabolites with 0-30% Missing Data - to be imputed")
+
+ggplotly(na_plot3)
+
+```
+
+### Are Metabolites with missing values often lower intensities?
+
+Below we plot the cumulative density of Metabolite measures by those that had missing data and those that did not have any. This looks as we'd expect for metabolites.
+
+```{r 'lower_intensity_miss'}
+ms <- (data.frame(Metabolite = rownames(as.data.frame(missing_percentage)),missing_percentage))
+
+met.w = reshape2::melt(metab_data_filt2, id.vars=c("Sample", "Group","Plate")) ## melt df 
+
+colnames(met.w) = c("ID", "Group","Plate","Metabolite", "Value")
+ms = merge(met.w, ms, by="Metabolite")
+ms$Value = as.numeric(ms$Value)
+ms$Value[ms$Value == 0 ] = NA
+ms$Missing = ifelse(ms$missing_percentage>0,"Missing","None Missing")
+
+ggplot(data = na.omit(ms),aes(x=log2(Value),color=Missing)) + 
+  geom_density() + 
+  theme_classic() + 
+  xlab("Log2 transformed Metabolite abundance") + 
+  labs(caption = "") 
+
+```
+
+
+
+
+```{r 'density_across_samples'}
+# Metabolite abundance by sample
+msq = ms
+msq$Genotype = ms$Group 
+
+ggplot(data = na.omit(msq),aes(x=log2(Value), group = ID, color=Genotype)) + 
+  geom_density() + 
+  theme_classic() + 
+  xlab("Log2 transformed Metabolite abundance") + 
+  labs() 
+
+b4 = ggplot(data = na.omit(msq),aes(x=log2(Value), group = ID, color=Genotype)) + 
+  geom_density() + 
+  theme_classic() + 
+  xlab("Values before Imputation") + 
+  labs()
+```
+
+
+
+### Log2 vs. VSN transformations
+
+We'll use VSN here. (decided 2025-02-17)
+
+```{r 'VSN vs. Log2', full_width = T, fig.width=20, fig.height=7, message = F, warning = F}
+# transform these datas
+# saved several frames to preserve original 
+metab_data_filt2[metab_data_filt2 == 0]<-NA
+metab_vsn <- metab_data_filt2
+metab_log2 <- metab_data_filt2
+metab_log10 <- metab_data_filt2
+
+
+data_norm_og = metab_data_filt2 # just a backup version of metab_data_filt2
+
+
+### LOG2 VERSION 
+
+metab_log2[,4:ncol(metab_log2)] = log2(metab_log2[,4:ncol(metab_log2)])
+
+metab.m.log2 = reshape2::melt(metab_log2, id.vars=c(colnames(metab_log2)[1:3]))
+
+
+a = ggplot(metab.m.log2, aes(x=Sample,y=value, color =Group )) + 
+  geom_boxplot() + 
+  coord_flip() + 
+  theme_classic() + 
+  ggtitle("Log2 Abundance Values") 
+
+
+set.seed(777)
+
+### LOG10 VERSION 
+# log10 transformed data
+metab_log10[,4:ncol(metab_log10)] = log10(metab_log10[,4:ncol(metab_log10)])
+metab.m.log10 = reshape2::melt(metab_log10, id.vars=c(colnames(metab_log10)[1:3]))
+
+b = ggplot(na.omit(metab.m.log10), aes(x=Sample, y=value, color =Group )) +
+  geom_boxplot() + 
+  coord_flip()+
+  theme_classic() + 
+  ggtitle("Log10 Abundance Values") 
+
+
+# VSN version
+metab.vsn = as.data.frame(t(normalizeVSN(t(metab_vsn[,4:ncol(metab_vsn)] ))))
+# add meta data back in
+metab.vsn$Sample <- metab_vsn$Sample
+metab.vsn$Group <- metab_vsn$Group
+metab.vsn$Plate <- metab_vsn$Plate
+
+metab.vsn <- metab.vsn %>% relocate(Sample, Group, Plate)
+
+metab.vsn.m = reshape2::melt(metab.vsn, id.vars= c("Sample", "Group", "Plate") )
+
+c = ggplot(na.omit(metab.vsn.m), aes(x=Sample, y=value, color =Group )) +
+  geom_boxplot() + 
+  coord_flip()+
+  theme_classic() + 
+  ggtitle("Abundance Values after VSN") 
+
+
+
+
+a + b  + c
+
+# use VSN, it appears slightly better
+# we will call it data_norm since its the normalized data that we'll use moving forward***
+data_norm_FINAL <- metab.vsn # changed to data_norm_FINAL on 02/17/2025
+
+```
+
+
+
+
+### Impute
+
+We need to impute since there are a few Metabolites with 0-30% missingness 
+
+We will impute the missing values from a truncated distribution with parameters estimated using quantile regression. Plots are in order: cumulative intensity distributions prior to imputation, after imputation, and the amount of missingness per sample (now none)
+
+
+```{r 'after_imp_density',  fig.width=8, fig.height=3, message=FALSE, warning=FALSE}
+# set your seed to ensure that any random process performed during imputation
+# is performed in the exact same random process each time you run this code chunk 
+# important for reproducibility 
+set.seed(777)
+
+# this should use VSN data as determined in above transformation comparisons
+data_norm_FINAL[,4:length(data_norm_FINAL)] = impute.QRILC(data_norm_FINAL[,4:length(data_norm_FINAL)], tune.sigma = 1)[[1]]
+# FIND DATA - VSN_METAB
+#saveRDS(data_norm, "20241121_saved_RDS_obs/vsn_metab.rds")
+
+# melt final data for plotting purposes
+metab.imp = reshape2::melt(data_norm_FINAL,id.vars=c(colnames(data_norm_FINAL)[1:3])) # represents normalized, imputed values 
+# saveRDS(metab.imp, "20241121_saved_RDS_obs/vsn_metab_m.rds")
+
+b4 <- ggplot(metab.vsn.m, aes(x=value, group = Sample, color = Group )) + 
+  geom_density() + 
+  theme_classic() + ggtitle("Values after VSN") + labs(caption = "Imputation fills the values in a bit better") + theme(plot.caption = element_text(hjust = 0))
+
+
+after = ggplot(metab.imp,aes(x=value, group = Sample, color = Group )) +
+  geom_density() + 
+  theme_classic() + 
+  labs(title = "Values after VSN + Imputation") 
+
+b4 + after 
+
+
+metabs = data.frame( Sample=data_norm_FINAL$Sample, Group = data_norm_FINAL$Group, count = unlist(lapply(1:nrow(data_norm_FINAL[,4:length(data_norm_FINAL)]), function(x) 
+sum(data_norm_FINAL[x,4:length(data_norm_FINAL)]> 0) )))
+
+
+after_imp <-
+  ggplot(metabs, aes(x = Sample, y = count, fill = Group)) + geom_bar(stat =
+                                                                        "identity") + theme_classic() +
+  scale_y_continuous(expand = c(0, 0)) +
+  scale_fill_manual(values = viridis::viridis(8)[1:8]) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle("Confirming that there are no missing values after imputation")
+
+ggplotly(after_imp)
+
+
+```
+
+
+## Data visualization {.tabset}
+
+### PCA plot of the groups 
+
+PCA on VSN and imputed data. We can see a split between groups here, highlighting differences across groups.
+
+
+```{r 'pca'}
+
+# make sure to scale data
+res.pca <- prcomp(data_norm_FINAL[,4:ncol(data_norm_FINAL)],  scale = TRUE)
+
+df = data.frame(res.pca$x)
+df$Group =data_norm_FINAL$Group
+df$Sample = data_norm_FINAL$Sample
+
+rownames(data_norm_FINAL) <- data_norm_FINAL$Sample
+
+# Plot different PCs and color by group + plate
+autoplot(res.pca, data = data_norm_FINAL, color = "Group", label = T, x = 1, y = 2) + theme_bw()
+autoplot(res.pca, data = data_norm_FINAL, color = "Group", label = T, x = 1, y = 3) + theme_bw()
+autoplot(res.pca, data = data_norm_FINAL, color = "Plate", label = T, x = 1, y = 2) + theme_bw() + theme(plot.caption = element_text(hjust = 0))
+
+
+
+```
+
+
+
+### Heatmap
+ 
+#### By Group
+
+HM of Normalized&Imputed Values  
+
+```{r 'norm_imp_HM'}
+# similar to precious heatmap code
+# now uses normalized + imputed values
+heat.df = t(data_norm_FINAL[,4:ncol(data_norm_FINAL)])
+rownames(heat.df)=NULL
+
+temp = data.frame(Group = data_norm_FINAL$Group)
+
+colnames(heat.df) = data_norm_FINAL$Sample
+rownames(temp) = colnames(heat.df)
+
+pheatmap(heat.df,scale="row", annotation_col =  temp,color=colorRampPalette(c("navy", "white", "red"))(50),annotation_colors = anno_colors)
+
+pheatmap(heat.df,scale="row", annotation_col =  temp, color=colorRampPalette(c("navy", "white", "red"))(50), annotation_colors = anno_colors, cluster_rows = FALSE, cluster_cols = FALSE)
+
+
+```
+
+
+#### By Plate
+
+```{r}
+# HEATMAPS NOW BY plate RATHER THAN GROUP
+# similar to precious heatmap code
+# now uses normalized + imputed values
+heat.df2 = t(data_norm_FINAL[,4:ncol(data_norm_FINAL)])
+rownames(heat.df2)=NULL
+
+temp2 = data.frame(Plate = data_norm_FINAL$Plate)
+
+colnames(heat.df2) = data_norm_FINAL$Sample
+rownames(temp2) = colnames(heat.df2)
+
+Var2 <- viridis::viridis(length(unique(temp2$Plate)))
+names(Var2) <- unique(factor(temp2$Compound, levels = unique(temp2$Plate)))
+
+anno_colors2 <- list(Compound = Var2)
+
+
+hm_exp_Compound1 <- pheatmap(heat.df2,scale="row", annotation_col =  temp2,color=colorRampPalette(c("navy", "white", "red"))(50),annotation_colors = anno_colors2, main = "Expression by Plate", silent = F)
+# saveRDS(hm_exp_Compound1, "20241011_supplemental_figures+lists/hm_exp_Compound1.rds")
+#ggsave(hm_exp_Compound1, filename = "20241011_supplemental_figures+lists//hm_exp_Compound1.png")
+
+hm_exp_Compound2 <- pheatmap(heat.df2,scale="row", annotation_col =  temp2, color=colorRampPalette(c("navy", "white", "red"))(50), annotation_colors = anno_colors2, cluster_rows = FALSE, cluster_cols = FALSE, main = "Expression by Plate")
+# saveRDS(hm_exp_Compound2, "20241011_supplemental_figures+lists/hm_exp_Compound2.rds")
+#ggsave(hm_exp_Compound2, filename = "20241011_supplemental_figures+lists//hm_exp_Compound2.png")
+
+```
+
+#### Giant Expression Map 
+
+```{r fig.height=30, fig.width=20}
+# the fig.height=30, fig.width=20 in the chunk specifications above is what 
+# adjusts the size of this heatmap
+# HEATMAPS NOW BY Compound RATHER THAN GROUP
+heat.df2 = t(data_norm_FINAL[,4:ncol(data_norm_FINAL)])
+rownames(heat.df2)= rownames(t(data_norm_FINAL[,4:ncol(data_norm_FINAL)]))
+
+temp2 = data.frame(Group = data_norm_FINAL$Group)
+
+colnames(heat.df2) = data_norm_FINAL$Sample
+rownames(temp2) = colnames(heat.df2)
+
+Var2 <- viridis::viridis(length(unique(temp2$Group)))
+names(Var2) <- unique(factor(temp2$Compound, levels = unique(temp2$Group)))
+
+anno_colors2 <- list(Compound = Var2)
+
+
+GIANT_hm_exp_Compound2 <- pheatmap(heat.df2,scale="row", annotation_col =  temp2, color=colorRampPalette(c("navy", "white", "red"))(50), annotation_colors = anno_colors2, cluster_rows = FALSE, cluster_cols = FALSE, main = "Expression by Group")
+GIANT_hm_exp_Compound2
+# saveRDS(hm_exp_Compound2, "20241011_supplemental_figures+lists/hm_exp_Compound2.rds")
+# ggsave(GIANT_hm_exp_Compound2, 
+#        filename = "20241011_supplemental_figures+lists/GIANT_hm_exp_Compound2.png",
+#        height = 30,
+#        width = 20)
+
+
+```
+
+
