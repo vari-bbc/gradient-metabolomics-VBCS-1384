@@ -1,0 +1,402 @@
+---
+title: "Differential Expression"
+author: "Hannah Damico"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+source("libs_opts.R")
+# if vsn_metab.rds is not save in a folder named "Saved_Content"
+# then the below line will not run
+# either adjust below file path or save vsn_metab.rds to a "Saved_Content" folder
+vsn_metab <- readRDS("Saved_Content//vsn_metab.rds")
+vsn_metab <- vsn_metab %>%  
+  mutate(Dosage = Group) %>% 
+  relocate(Sample, Dosage, Group, Plate)
+
+# make sure Plate is
+vsn_metab$Plate <- factor(vsn_metab$Plate,  levels = 1:3)
+vsn_metab$Dosage <- factor(vsn_metab$Dosage, levels = c("0uM", "0pt25uM", "0pt5uM", "1uM", "2uM", "4uM"))
+# re-save this to include Dosage which is just group
+# I didn't do this in the initial processing steps
+# bc I wanted to keep the column indices the same
+# saveRDS(vsn_metab, "Saved_Content/vsn_metab.rds")
+
+
+```
+
+
+# {.tabset}
+
+
+```{r eval = T}
+# create temporary matrices for limma
+tm = vsn_metab
+
+ids = vsn_metab[, 1:4] # grab meta data 
+tm = t(tm[, 5:length(tm)]) # grab metab vsn values, transpose them
+
+tm = as.data.frame(tm)
+
+colnames(tm) <- vsn_metab$Sample
+
+# want indivudually saved variables for design matrix
+Dosage = factor(vsn_metab$Dosage, levels = unique(vsn_metab$Dosage))
+
+Plate = factor(vsn_metab$Plate) # this should be your dupcorr
+# duplicate correlation in limma accounts for repeated measures
+# https://rdrr.io/bioc/limma/man/dupcor.html
+
+ID = factor(vsn_metab$Sample) #  save IDs
+
+```
+
+
+```{r 'raw_plots_top_genes',fig.height=8,full_width = T, eval = T}
+# do some renaming for limma workflow consistency
+# dupcor takes in "blocks" as the argument for your repeated measure
+# changing the original variable from Plate -> Blocks
+# shows that our Plate variable is directly used in our dupcor 
+# to account for repeated measures
+# Not an entirely necessary step
+targets = data.frame("Dosage" = Dosage, "Blocks" = Plate) 
+
+# The ~ 0 excludes the intercept term from the model
+# makes for cleaner contrast interpretation from model
+design = model.matrix(~ 0 + Dosage, data= tm)
+
+corfit <- duplicateCorrelation(tm, design, block = targets$Blocks)
+
+# lmFit() is the actual limma fit
+# robust = FALSE to adjust for how sample outliers are treated in modeling
+fit <- lmFit(tm, design, block = targets$Block, correlation=corfit$consensus, robust = FALSE)
+
+# create all comparisons of interest
+cont2 =  makeContrasts(diff_0pt25uM_0uM = Dosage0pt25uM - Dosage0uM, 
+                       diff_0pt5uM_0pt0uM = Dosage0pt5uM - Dosage0uM,
+                       diff_1uM_0uM = Dosage1uM - Dosage0uM,
+                       diff_2uM_0uM = Dosage2uM - Dosage0uM,
+                       diff_4uM_0uM = Dosage4uM - Dosage0uM,
+                       levels = design)
+
+set.seed(777) # keep this seed consistent throughout the entire process
+# Need an individual model fit for each contrast created above
+fit1 <- contrasts.fit(fit, contrasts = cont2[,1])
+fit2 <- contrasts.fit(fit, contrasts = cont2[,2])
+fit3 <- contrasts.fit(fit, contrasts = cont2[,3])
+fit4 <- contrasts.fit(fit, contrasts = cont2[,4])
+fit5 <- contrasts.fit(fit, contrasts = cont2[,5])
+```
+
+
+
+```{r eval = T}
+set.seed(777)
+# save all of your model fits in one place
+save_fit <- list(fit1, fit2, fit3, fit4, fit5)
+
+# running ebayes lets you leverage the variance across your metabolites 
+# and increases your power to detect differentially expressed genes
+# https://rdrr.io/bioc/limma/man/ebayes.html
+run_bayes <- function(fit){
+# robust = FALSE to adjust for how *metabolite* outliers are treated in modeling
+res = eBayes(fit, robust = T, trend = T)
+# check out ?topTable for more info
+# Benjamani Hochburg method for FDR correction
+top = topTable(res, adjust.method = "BH", p.value = 1, number = 1000000) 
+
+ps = as.data.frame(res$p.value)
+
+# below code is helpful for later plots that use coloring by significance
+top$Metabolite = rownames(top) 
+top$Sig = ifelse(top$adj.P.Val < 0.05, "FDR", "NS")
+top$Sig = factor(top$Sig, levels=c("NS","FDR"))
+
+
+top$Super_Sig = ifelse(top$adj.P.Val < 0.000001, "FDR", "")
+top$Super_Sig = factor(top$Super_Sig, levels=c("","FDR"))
+
+# top 10 signif metabolies
+of.interest = top$Metabolite[1:10]
+
+top$Label = rep("") 
+top$Label = ifelse(top$Metabolite %in% of.interest, top$Metabolite, "")
+
+ 
+top$sz <- case_when(top$Sig == "FDR" ~ "3", top$Sig == "NS"~ "1") 
+top$sz <- as.numeric(top$sz) 
+
+top$sz2 <- case_when(top$Super_Sig == "FDR" ~ "3", top$Super_Sig == "NS"~ "1") 
+top$sz2 <- as.numeric(top$sz2) 
+
+colnames(top)[1:3] <- gsub("\\.{3}", "-", colnames(top)[1:3])
+
+top <- top %>% mutate(Metabolite = rownames(top)) %>% relocate(Metabolite)
+
+return(top)
+
+}
+
+nms <- c("diff_0pt25uM_0uM", "diff_0pt5uM_0pt0uM", "diff_1uM_0uM", "diff_2uM_0uM", "diff_4uM_0uM")
+
+fits <-lapply(list(fit1, fit2, fit3, fit4, fit5), run_bayes)
+names(fits) <- nms
+# fits
+
+# Function to add a new column to a data frame based on the corresponding element in nms
+add_column_from_vector <- function(df, name) {
+  df$nms <- name
+  return(df)
+}
+
+# Use mapply to apply the function to each data frame and the corresponding element in nms
+fits_nmd <- mapply(add_column_from_vector, fits, nms, SIMPLIFY = FALSE)
+
+r <-lapply(fits_nmd, function(df){
+  range(df$logFC)
+})
+
+# data.table::rbindlist(fits_nmd, idcol = T)
+# fits_nmd
+# saveRDS(fits_nmd, "20241121_saved_RDS_obs/limma_fits_nmd.rds") # on 2024/03/12
+
+
+
+```
+
+## Volcano Plots 
+
+```{r warning=FALSE, fig.width=12, fig.height=6}
+
+colorset = c('FDR'='red','NS'='black')
+
+volcanos <- lapply(fits_nmd, function(x){
+
+  ggplot(x,aes(x=logFC,y= -log10(adj.P.Val), color = Sig)) +
+  geom_point(aes(size = sz > 1)) +
+    scale_size_manual(values = c(1,2), guide = "none") +
+    xlab("Log2 Fold-Change") +
+    ggtitle(x$nms) +
+    theme(title = element_text(size = 14)) +
+  theme(legend.position = 'top', plot.title = element_text(size = 11, face = "bold")) +
+  ggrepel::geom_text_repel(data = x[x$Label != "", ], aes(label= Label),
+                           nudge_y = -1, direction = "both", 
+                           show.legend=F, box.padding = 2, point.padding = 0.2, max.overlaps = Inf)  +
+  scale_color_manual(values = colorset) +
+  guides(label ="none",text="none") + 
+    scale_x_continuous(limits = c(-5, 5)) +
+    theme_bw()
+
+})
+
+volcanos
+```
+
+
+## Raw Plots
+
+```{r fig.width=12, fig.height=5}
+# Raw values with VSN transformations
+man.for <- function(df) { 
+# grab top 6 significant metabs, 6 is default in head() function
+dntest = rownames(head(df))
+
+dntest = tm[rownames(tm) %in% dntest, ]
+dntest2 = t(dntest) 
+dntest2 = as.data.frame(dntest2) 
+dntest2$id = rownames(dntest2) 
+
+dntest2 = dntest2 %>%
+  tidyr::gather(variable, value, -id) 
+
+dntest3 <- dntest2 %>%  mutate(
+    Group = sapply(strsplit(id, "[-_]"), function(x) x[2]),  # Extract "0um"
+    Plate = sapply(strsplit(id, "[-_]"), function(x) x[3])   # Extract "2"
+  ) %>% relocate(id, Group, Plate)
+
+dntest3$Group <- factor(dntest3$Group, levels = c("0uM", "0pt25uM", "0pt5uM", "1uM", "2uM", "4uM"))
+dntest3$Metabolite <- dntest3$variable
+
+plo = ggplot(dntest3, aes(x = Group, y = (value), color = Group, group = id)) + geom_point()  + facet_wrap(~ Metabolite, scales = "free") + labs(title = "Raw values of the top 6 DE Metabolites from limma") + theme(axis.text.x = element_text(angle = 45))
+
+return(plo) 
+
+} 
+
+sanity.check = lapply(fits_nmd, function(xx) { man.for(xx)})
+
+contr.names = nms
+
+# cteate a list of these plots with appropriate titles
+raw_plots <- list()
+
+for(i in seq_along(contr.names)) { 
+ raw_plots[[i]] <- sanity.check[[i]] + labs(title = paste("Raw values of top DE metabolites in", contr.names[[i]])
+)
+} 
+
+
+names(raw_plots) <- contr.names
+
+# in case you want to save the exact data used to generate the plots above
+# uncomment & run this code below from 
+# here
+# raw_data <- lapply(fits_nmd, function(df)
+#   {dntest = rownames(head(df) )
+# 
+# dntest = tm[rownames(tm) %in% dntest, ]
+# dntest2 = t(dntest) 
+# dntest2 = as.data.frame(dntest2) 
+# dntest2$id = rownames(dntest2) 
+# 
+# dntest2 = dntest2 %>%
+#   tidyr::gather(variable, value, -id) 
+# 
+# dntest3 <- dntest2 %>%  mutate(  # Extract "w00"
+#     Group = sapply(strsplit(id, "[-_]"), function(x) x[2]),  # Extract "0um"
+#     Plate = sapply(strsplit(id, "[-_]"), function(x) x[3])   # Extract "2"
+#   ) %>% relocate(id, Group, Plate)
+# 
+# dntest3$Metabolite <- dntest3$variable
+# return(dntest3)
+# }
+# )
+# to here 
+
+# creates csv files of all comparison logFC and p values 
+# mapply(function(df, name) {write.csv(df, name)}, raw_data, paste0("Data_Files/", contr.names, "-Raw_Plots.csv"))
+
+
+raw_plots
+
+```
+
+
+
+## Top Significant Metabolites 
+
+```{r eval = T}
+# save this so we dont have to keep re-running above to get top back
+# og_top <- top 
+# this code generates reduced size dataframes of limma/ebayes results
+top_lists <- function(fit){
+top <- fit
+top = top %>% relocate(Metabolite) 
+
+top = top %>% dplyr::select("Metabolite", "logFC",  "AveExpr", "P.Value", "adj.P.Val", "Sig")
+# this function just cleans up some names
+splitz = function(q) {
+  q <- cbind(t(as.data.frame(
+    strsplit(sub('(^[^_]+_[^_]+)_(.*)$', 
+                 '\\1 \\2', 
+                 q$Metabolite), ' '))), q[, -1 ]);
+  colnames(q)[colnames(q) == "V1"] <- c("Metabolite");
+  return(q)
+  }
+
+top = splitz(top)
+# rownames(top) <- NULL 
+colnames(top)[1] <- "Metabolite"
+
+top.view = 
+  top %>%
+  dplyr::select(Metabolite, "logFC", adj.P.Val) %>%
+  dplyr::filter(adj.P.Val < 0.05)
+
+top.view$Metabolite <- substr(top.view$Metabolite, start = 1, stop = 30)
+
+# top.view %>% kable() %>% kable_styling(full_width = FALSE)  
+
+
+### duplicate the same data cleaning steps with the "top" df so Nick has all genes available to him 
+top.print <- top %>% dplyr::select(Metabolite, "logFC", adj.P.Val) %>% mutate(logFC = round(logFC, 3), adj.P.Val = round(adj.P.Val, 10))
+
+
+return(top.print)
+}
+
+
+```
+
+
+
+
+
+```{r warning = F, results = 'asis'}
+# run the above function here
+top_ps <- lapply(fits_nmd, top_lists)
+
+
+tops2 = lapply(top_ps, function(qq) { qq = qq[c("Metabolite", "logFC", "adj.P.Val")] ; return(qq) })
+
+# order by adj.p.value
+tops2 = lapply(tops2, function(qq) { qq <- qq[order(qq$adj.P.Val),]; return(qq) }) 
+tops3 <- tops2
+
+# remove rownames
+tops2 <- lapply(tops2, function(x){rownames(x) = NULL
+return(x)})
+
+contr.names = nms
+
+# save list of dynamic datatables to present results of limma/ebayes
+top_tables <- list()
+for(i in seq_along(tops2)) { 
+  top_tables[[i]] <- 
+  tops2[[i]] %>% 
+    DT::datatable(caption = paste("Top differentially abundant Metabolites from LIMMA contrast: ", contr.names[[i]]))
+  
+  }
+
+names(top_tables) <- nms
+
+# saveRDS(tops2, "20241121_saved_RDS_obs/tops2.rds")
+```
+
+
+
+```{r}
+top_tables$diff_0pt25uM_0uM
+```
+
+
+---
+
+```{r}
+top_tables$diff_0pt5uM_0pt0uM
+```
+
+---
+
+
+```{r}
+top_tables$diff_1uM_0uM
+```
+
+
+
+```{r}
+top_tables$diff_2uM_0uM
+```
+
+
+
+```{r}
+top_tables$diff_4uM_0uM
+```
+
+
+
+```{r}
+# grab list of metabolites + their pvalues for integration
+integ_data <- lapply(fits_nmd, function(df) {
+  dat <- df[colnames(df) %in% c("Metabolite", "adj.P.Val")]
+  return(dat)
+})
+# creates csv files of all comparison logFC and p values 
+# mapply(function(df, name) {write.csv(df, name)}, integ_data, paste0("Saved_Content/", contr.names, "metab_integ_data.csv"))
+
+```
+
